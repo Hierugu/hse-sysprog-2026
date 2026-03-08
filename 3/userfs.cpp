@@ -19,8 +19,6 @@ struct block {
 	char memory[BLOCK_SIZE];
 	/** A link in the block list of the owner-file. */
 	rlist in_block_list = RLIST_LINK_INITIALIZER;
-
-	/* PUT HERE OTHER MEMBERS */
 };
 
 struct file {
@@ -38,8 +36,7 @@ struct file {
 	rlist in_file_list = RLIST_LINK_INITIALIZER;
 	/** Current file size in bytes. */
 	size_t size = 0;
-
-	/* PUT HERE OTHER MEMBERS */
+	bool deleted = false;
 };
 
 /**
@@ -78,7 +75,7 @@ find_file_by_name(const char *filename)
 	return NULL;
 }
 
-static filedesc *
+static inline filedesc *
 find_filedesc_by_fd(int fd)
 {
 	if (fd < 0 || fd >= (int)file_descriptors.size())
@@ -86,12 +83,24 @@ find_filedesc_by_fd(int fd)
 	return file_descriptors[fd];
 }
 
-static block *
+static inline block *
 allocate_block()
 {
 	block *b = new block();
 	rlist_create(&b->in_block_list);
 	return b;
+}
+
+static inline void
+advance_to_next_block(block **current_block, size_t *offset, rlist *blocks_head)
+{
+	rlist *next = (*current_block)->in_block_list.next;
+	if (next == blocks_head) {
+		*current_block = NULL;
+	} else {
+		*current_block = rlist_entry(next, block, in_block_list);
+	}
+	*offset = 0;
 }
 
 static void
@@ -209,13 +218,7 @@ ufs_write(int fd, const char *buf, size_t size)
 		desc->pos += to_write;
 		
 		if (desc->offset == BLOCK_SIZE) {
-			rlist *next = desc->current_block->in_block_list.next;
-			if (next == &f->blocks) {
-				desc->current_block = NULL;
-			} else {
-				desc->current_block = rlist_entry(next, block, in_block_list);
-			}
-			desc->offset = 0;
+			advance_to_next_block(&desc->current_block, &desc->offset, &f->blocks);
 		}
 	}
 	
@@ -273,13 +276,7 @@ ufs_read(int fd, char *buf, size_t size)
 		desc->pos += to_read;
 		
 		if (desc->offset == BLOCK_SIZE) {
-			rlist *next = desc->current_block->in_block_list.next;
-			if (next == &desc->atfile->blocks) {
-				desc->current_block = NULL;
-			} else {
-				desc->current_block = rlist_entry(next, block, in_block_list);
-			}
-			desc->offset = 0;
+			advance_to_next_block(&desc->current_block, &desc->offset, &desc->atfile->blocks);
 		}
 	}
 	
@@ -299,19 +296,9 @@ ufs_close(int fd)
 	file *f = desc->atfile;
 	f->refs--;
 	
-	if (f->refs == 0) {
-		file *tmp;
-		bool in_list = false;
-		rlist_foreach_entry(tmp, &file_list, in_file_list) {
-			if (tmp == f) {
-				in_list = true;
-				break;
-			}
-		}
-		if (!in_list) {
-			free_file_blocks(f);
-			delete f;
-		}
+	if (f->refs == 0 && f->deleted) {
+		free_file_blocks(f);
+		delete f;
 	}
 	
 	file_descriptors[fd] = NULL;
@@ -331,6 +318,7 @@ ufs_delete(const char *filename)
 	}
 	
 	rlist_del_entry(f, in_file_list);
+	f->deleted = true;
 	
 	if (f->refs == 0) {
 		free_file_blocks(f);
@@ -448,12 +436,12 @@ ufs_destroy(void)
 		delete f;
 	}
 	
-	for (size_t i = 0; i < file_descriptors.size(); ++i) {
+	size_t fd_count = file_descriptors.size();
+	for (size_t i = 0; i < fd_count; ++i) {
 		if (file_descriptors[i]) {
 			delete file_descriptors[i];
 		}
 	}
 	
-	std::vector<filedesc*> empty;
-	file_descriptors.swap(empty);
+	std::vector<filedesc*>().swap(file_descriptors);
 }
