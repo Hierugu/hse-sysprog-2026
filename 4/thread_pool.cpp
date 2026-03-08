@@ -3,7 +3,6 @@
 #include <pthread.h>
 #include <queue>
 #include <time.h>
-#include <sys/time.h>
 
 enum task_state {
 	TASK_NEW,
@@ -64,6 +63,10 @@ worker_thread(void *arg)
 		
 		task->function();
 		
+		pthread_mutex_lock(&pool->mutex);
+		pool->task_count--;
+		pthread_mutex_unlock(&pool->mutex);
+		
 		pthread_mutex_lock(&task->mutex);
 		task->state = TASK_FINISHED;
 		bool detached = task->is_detached;
@@ -75,10 +78,6 @@ worker_thread(void *arg)
 			pthread_cond_destroy(&task->cond);
 			delete task;
 		}
-		
-		pthread_mutex_lock(&pool->mutex);
-		pool->task_count--;
-		pthread_mutex_unlock(&pool->mutex);
 	}
 	
 	return NULL;
@@ -132,23 +131,27 @@ thread_pool_delete(struct thread_pool *pool)
 int
 thread_pool_push_task(struct thread_pool *pool, struct thread_task *task)
 {
+	pthread_mutex_lock(&task->mutex);
+	task->state = TASK_PUSHED;
+	task->pool = pool;
+	pthread_mutex_unlock(&task->mutex);
+	
 	pthread_mutex_lock(&pool->mutex);
 	
 	if (pool->task_count >= TPOOL_MAX_TASKS) {
 		pthread_mutex_unlock(&pool->mutex);
+		pthread_mutex_lock(&task->mutex);
+		task->state = TASK_NEW;
+		task->pool = NULL;
+		pthread_mutex_unlock(&task->mutex);
 		return TPOOL_ERR_TOO_MANY_TASKS;
 	}
 	
 	pool->task_queue.push(task);
 	pool->task_count++;
 	
-	pthread_mutex_lock(&task->mutex);
-	task->state = TASK_PUSHED;
-	task->pool = pool;
-	pthread_mutex_unlock(&task->mutex);
-	
-	if (pool->active_threads < pool->max_threads && 
-	    pool->active_threads < pool->task_count) {
+	if (pool->active_threads < pool->max_threads &&
+	    (size_t)pool->active_threads < pool->task_queue.size()) {
 		pthread_t thread;
 		pthread_create(&thread, NULL, worker_thread, pool);
 		pool->threads.push_back(thread);
